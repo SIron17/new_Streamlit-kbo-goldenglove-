@@ -88,28 +88,6 @@ python -m src.train.predict
 streamlit run app/main.py
 ```
 
-- 앱은 연도 선택 대신 **사용자 업로드 CSV(타자/투수)** 기반으로 즉시 예측합니다.
-- 포지션별 Top-k 규칙:
-  - Outfielders Top-9
-  - 나머지 포지션 Top-3
-- 모델 학습은 앱에서 수행하지 않고, 사전에 학습된 모델(`models/`)을 사용합니다.
-
-### 5) 베이스라인 학습 + 평가
-```bash
-python -m src.train.train_model
-```
-
-- Holdout: 최신 연도 1개
-- 지표: Top-1(포지션), OF Top-3, MRR, AUC, PR-AUC
-- 결과 로그: `results/leaderboard.csv`
-
-### 6) 연도별 예측
-```bash
-python -m src.train.predict --year 2025
-```
-
-- 출력: `predictions/pred_2025.parquet`
-
 ## 현재 상태
 - 본 PR은 스캐폴딩/문서화 중심입니다.
 - 엔트리포인트는 최소 스텁으로 동작하며, 다음 PR에서 데이터 처리/피처/모델 로직을 확장합니다.
