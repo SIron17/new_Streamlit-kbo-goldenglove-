@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+
+# Virtual env / cache
+.venv/
+.cache/
+.pytest_cache/
+.mypy_cache/
+
+# Local outputs
+data/processed/
+predictions/
+results/*.csv
+!results/*template*.csv
+
+# OS / Editor
+.DS_Store
+.vscode/
+.idea/
