@@ -115,10 +115,21 @@ python -m src.train.predict --year 2025
 - 엔트리포인트는 최소 스텁으로 동작하며, 다음 PR에서 데이터 처리/피처/모델 로직을 확장합니다.
 
 ## 충돌 없는 PR 운영 가이드
-- 항상 최신 `main` 기준으로 **새 브랜치**를 생성해서 작업합니다.
-- 기존 PR 브랜치를 재사용하지 않습니다.
-- PR 생성 전 아래를 확인합니다.
-  - `git status`가 clean인지
-  - 충돌 마커(`<<<<<<<`, `=======`, `>>>>>>>`)가 없는지
-  - 필수 실행 커맨드가 정상 동작하는지
+- 작업 시작 전 반드시 `main`을 최신으로 맞춘 뒤 새 브랜치를 만듭니다.
+- 기존 PR 브랜치는 재사용하지 않습니다.
+
+권장 순서(로컬 기준):
+```bash
+git checkout main
+git pull origin main   # remote가 있을 때
+
+git checkout -b <new-feature-branch>
+# 코드 변경/검증
+git push -u origin <new-feature-branch>
+```
+
+PR 생성 전 체크:
+- `git status`가 clean인지
+- 충돌 마커(`<<<<<<<`, `=======`, `>>>>>>>`)가 없는지
+- 필수 실행 커맨드가 정상 동작하는지
 
