@@ -52,7 +52,49 @@ def build_parser() -> argparse.ArgumentParser:
         default=3,
         help="Run rolling holdout backtest for recent N years (diagnostic only).",
     )
+    parser.add_argument(
+        "--test-years",
+        type=int,
+        default=2,
+        help="Use the most recent N years as final test set (time-based split).",
+    )
     return parser
+
+
+def split_train_test_by_year(df: pd.DataFrame, test_years: int) -> tuple[pd.DataFrame, pd.DataFrame, list[int]]:
+    if test_years < 1:
+        raise ValueError("test_years must be >= 1")
+
+    years = sorted(int(y) for y in df["year"].dropna().unique())
+    if len(years) < 2:
+        raise RuntimeError("At least two years of data are required for train/test split.")
+
+    if test_years >= len(years):
+        test_years = len(years) - 1
+
+    test_year_list = years[-test_years:]
+    train_df = df[~df["year"].isin(test_year_list)].copy()
+    test_df = df[df["year"].isin(test_year_list)].copy()
+    if train_df.empty or test_df.empty:
+        raise RuntimeError("Train/test split is empty after applying year-based split.")
+    return train_df, test_df, test_year_list
+
+
+def build_model(random_state: int) -> LGBMClassifier:
+    return LGBMClassifier(
+        n_estimators=200,
+        learning_rate=0.05,
+        num_leaves=15,
+        min_child_samples=20,
+        feature_fraction=0.8,
+        bagging_fraction=0.8,
+        bagging_freq=1,
+        reg_alpha=0.5,
+        reg_lambda=1.0,
+        objective="binary",
+        random_state=random_state,
+        class_weight="balanced",
+    )
 
 
 def select_features(df: pd.DataFrame, include_rank_flags: bool) -> list[str]:
@@ -128,14 +170,7 @@ def evaluate_one_year(
     x_test = test_df[features].fillna(0.0)
     y_test = test_df["label"].astype(int)
 
-    model = LGBMClassifier(
-        n_estimators=300,
-        learning_rate=0.05,
-        num_leaves=31,
-        objective="binary",
-        random_state=random_state,
-        class_weight="balanced",
-    )
+    model = build_model(random_state=random_state)
     model.fit(x_train, y_train)
     test_df["score"] = model.predict_proba(x_test)[:, 1]
 
@@ -196,33 +231,24 @@ def main() -> None:
     args = build_parser().parse_args()
 
     df = pd.read_parquet(args.train_table)
-    holdout_year = int(df["year"].max())
+    train_df, test_df, test_years = split_train_test_by_year(df, test_years=args.test_years)
+    holdout_year = int(test_years[-1])
 
     features = select_features(df, include_rank_flags=args.include_rank_flags)
     if not features:
         raise RuntimeError("No numeric features found for training.")
 
-    result = evaluate_one_year(df, holdout_year, features, args.random_state)
-    if not result:
-        raise RuntimeError("Train/test split is empty.")
-
-    # train final model (same split) for artifact save
-    train_df = df[df["year"] < holdout_year].copy()
-    test_df = df[df["year"] == holdout_year].copy()
-
     x_train = train_df[features].fillna(0.0)
     y_train = train_df["label"].astype(int)
     x_test = test_df[features].fillna(0.0)
+    y_test = test_df["label"].astype(int)
 
-    model = LGBMClassifier(
-        n_estimators=300,
-        learning_rate=0.05,
-        num_leaves=31,
-        objective="binary",
-        random_state=args.random_state,
-        class_weight="balanced",
-    )
+    model = build_model(random_state=args.random_state)
     model.fit(x_train, y_train)
+    test_df["score"] = model.predict_proba(x_test)[:, 1]
+    top1_rate, of_top3_rate, mrr = compute_group_metrics(test_df)
+    auc = float(roc_auc_score(y_test, test_df["score"])) if y_test.nunique() > 1 else 0.0
+    pr_auc = float(average_precision_score(y_test, test_df["score"])) if y_test.nunique() > 1 else 0.0
 
     args.model_path.parent.mkdir(parents=True, exist_ok=True)
     with args.model_path.open("wb") as f:
@@ -234,6 +260,7 @@ def main() -> None:
             {
                 "features": features,
                 "holdout_year": holdout_year,
+                "test_years": test_years,
                 "include_rank_flags": args.include_rank_flags,
             },
             f,
@@ -256,26 +283,25 @@ def main() -> None:
         leaderboard_path=args.leaderboard_path,
         model_name="lightgbm_baseline",
         holdout_year=holdout_year,
-        top1_rate=result["Top1_rate"],
-        of_top3_rate=result["OF_Top3_rate"],
-        mrr=result["MRR"],
-        auc=result["AUC"],
-        pr_auc=result["PR_AUC"],
+        top1_rate=top1_rate,
+        of_top3_rate=of_top3_rate,
+        mrr=mrr,
+        auc=auc,
+        pr_auc=pr_auc,
         feature_set_notes=feature_notes,
     )
 
-    test_df["score"] = model.predict_proba(x_test)[:, 1]
-
     print("[train_model] complete")
-    print(f"- holdout_year: {holdout_year}")
+    print(f"- holdout_year(last_test_year): {holdout_year}")
+    print(f"- test_years: {test_years}")
     print(f"- train_rows: {len(train_df)} / test_rows: {len(test_df)}")
     print(f"- n_features: {len(features)}")
     print(f"- include_rank_flags: {args.include_rank_flags}")
-    print(f"- Top1_rate: {result['Top1_rate']:.4f}")
-    print(f"- OF_Top3_rate: {result['OF_Top3_rate']:.4f}")
-    print(f"- MRR: {result['MRR']:.4f}")
-    print(f"- AUC: {result['AUC']:.4f}")
-    print(f"- PR_AUC: {result['PR_AUC']:.4f}")
+    print(f"- Top1_rate: {top1_rate:.4f}")
+    print(f"- OF_Top3_rate: {of_top3_rate:.4f}")
+    print(f"- MRR: {mrr:.4f}")
+    print(f"- AUC: {auc:.4f}")
+    print(f"- PR_AUC: {pr_auc:.4f}")
     if bt_rows:
         bt = pd.DataFrame(bt_rows)
         print(f"- backtest_years: {recent_years}")
