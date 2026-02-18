@@ -97,6 +97,7 @@ streamlit run app/main.py
 #### Streamlit 테스트용 업로드 파일 생성 (예: 2025)
 ```bash
 python -m scripts.create_streamlit_test_files --year 2025 --source processed
+python -m scripts.create_streamlit_test_files --year 2025
 ```
 
 생성 파일:
@@ -105,6 +106,7 @@ python -m scripts.create_streamlit_test_files --year 2025 --source processed
 
 이 2개 파일을 Streamlit 사이드바 업로더에 넣으면 `predict --year 2025` 결과와 높은 정합도로 테스트할 수 있습니다.
 (raw 원본 기반 샘플은 `--source raw`로 생성 가능)
+이 2개 파일을 Streamlit 사이드바 업로더에 넣어서 UI를 바로 테스트할 수 있습니다.
 
 ### 5) 베이스라인 학습 + 평가
 ```bash
@@ -157,3 +159,6 @@ python -m src.train.train_model --include-rank-flags   # 기존 강한 랭크 �
 
 - 기본값은 `is_year_top*`, `is_pos_year_top*`를 제외해 과대평가를 완화합니다.
 - 최근 N개 연도 백테스트 요약(`--backtest-years`, 기본 3)도 함께 출력합니다.
+## 현재 상태
+- 본 PR은 스캐폴딩/문서화 중심입니다.
+- 엔트리포인트는 최소 스텁으로 동작하며, 다음 PR에서 데이터 처리/피처/모델 로직을 확장합니다.
