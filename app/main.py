@@ -4,15 +4,17 @@ from __future__ import annotations
 
 import json
 import pickle
-from math import pi
 from pathlib import Path
 
+import matplotlib.font_manager as fm
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 import streamlit as st
 
 MODEL_PATH = Path("models/baseline_model.pkl")
 FEATURES_PATH = Path("models/baseline_features.json")
+REFERENCE_TABLE_PATH = Path("data/processed/train_table.parquet")
 
 POSITION_TOPK_RULES = {
     "P": 3,
@@ -47,13 +49,20 @@ RADAR_PITCHER = ["stat_ERA", "stat_WHIP", "stat_SO", "stat_W", "stat_HR"]
 
 
 def _configure_korean_font() -> None:
-    plt.rcParams["font.family"] = [
+    candidate_names = [
+        "Noto Sans CJK KR",
+        "Noto Sans KR",
+        "NanumGothic",
         "Malgun Gothic",
         "AppleGothic",
-        "NanumGothic",
-        "Noto Sans CJK KR",
-        "DejaVu Sans",
     ]
+    available = {f.name for f in fm.fontManager.ttflist}
+    for name in candidate_names:
+        if name in available:
+            plt.rcParams["font.family"] = name
+            break
+    else:
+        plt.rcParams["font.family"] = "DejaVu Sans"
     plt.rcParams["axes.unicode_minus"] = False
 
 
@@ -61,6 +70,19 @@ def _safe_numeric(df: pd.DataFrame, cols: list[str]) -> None:
     for c in cols:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
+
+
+def _normalize_player_keys(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    if "name" in out.columns:
+        out["name"] = out["name"].astype(str).str.strip()
+    if "team" in out.columns:
+        out["team"] = out["team"].astype(str).str.strip()
+    if "year" in out.columns:
+        out["year"] = pd.to_numeric(out["year"], errors="coerce")
+    if "player_id" in out.columns:
+        out["player_id"] = pd.to_numeric(out["player_id"], errors="coerce")
+    return out
 
 
 def _looks_like_model_ready(df: pd.DataFrame, features: list[str]) -> bool:
@@ -77,6 +99,8 @@ def _to_unified_schema(df: pd.DataFrame, is_pitcher: bool, features: list[str]) 
         "Pos.": "position",
         "Position": "position",
         "position": "position",
+        "Year": "year",
+        "year": "year",
         "Age": "age",
         "age": "age",
     }
@@ -109,7 +133,7 @@ def _to_unified_schema(df: pd.DataFrame, is_pitcher: bool, features: list[str]) 
         out = out[out["gg_position"].isin(POSITION_TOPK_RULES.keys())].copy()
         out["is_pitcher"] = 0
 
-    keep_non_stats = {"name", "team", "age", "gg_position", "is_pitcher"}
+    keep_non_stats = {"year", "player_id", "name", "team", "age", "gg_position", "is_pitcher"}
     for col in list(out.columns):
         if col in keep_non_stats or col.startswith("stat_"):
             continue
@@ -120,9 +144,9 @@ def _to_unified_schema(df: pd.DataFrame, is_pitcher: bool, features: list[str]) 
     stat_cols = [c for c in out.columns if c.startswith("stat_")] + ["age"]
     _safe_numeric(out, stat_cols)
 
-    out["name"] = out["name"].astype(str).str.strip()
-    out["team"] = out["team"].astype(str).str.strip()
-    out["pred_year"] = 9999
+    out = _normalize_player_keys(out)
+    if "year" not in out.columns:
+        out["year"] = 9999
 
     return out, mode
 
@@ -140,13 +164,71 @@ def _load_model_and_features():
     return model, meta["features"]
 
 
+def _enrich_with_reference_features(input_df: pd.DataFrame, features: list[str]) -> pd.DataFrame:
+    if not REFERENCE_TABLE_PATH.exists():
+        return input_df
+
+    try:
+        ref_all_cols = pd.read_parquet(REFERENCE_TABLE_PATH, columns=[]).columns.tolist()
+        ref_cols = [
+            c
+            for c in ["year", "name", "team", "gg_position", "player_id"] + features
+            if c in ref_all_cols
+        ]
+        ref = pd.read_parquet(REFERENCE_TABLE_PATH, columns=ref_cols)
+    except Exception:
+        return input_df
+
+    input_df = _normalize_player_keys(input_df)
+    ref = _normalize_player_keys(ref)
+
+    if "year" in input_df.columns:
+        target_year = pd.to_numeric(input_df["year"], errors="coerce").dropna()
+        if not target_year.empty:
+            ref = ref[ref["year"] == int(target_year.mode().iloc[0])]
+
+    # 1순위: 연도+player_id 정합, 2순위: 연도+이름+팀+포지션
+    merged = input_df.copy()
+    merged["_row_id"] = np.arange(len(merged))
+
+    def _build_lookup(keys: list[str], suffix: str) -> pd.DataFrame | None:
+        if not all(c in merged.columns and c in ref.columns for c in keys):
+            return None
+        cols = keys + [f for f in features if f in ref.columns]
+        lookup = ref[cols].drop_duplicates(subset=keys, keep="first")
+        out = merged[["_row_id"] + keys].merge(lookup, on=keys, how="left")
+        rename_map = {f: f"{f}{suffix}" for f in features if f in out.columns}
+        return out[["_row_id"] + list(rename_map.keys())].rename(columns=rename_map)
+
+    primary_hit = _build_lookup(["year", "player_id"], suffix="__ref")
+    fallback_hit = _build_lookup(["year", "name", "team", "gg_position"], suffix="__ref2")
+
+    if primary_hit is not None:
+        merged = merged.merge(primary_hit, on="_row_id", how="left")
+    if fallback_hit is not None:
+        merged = merged.merge(fallback_hit, on="_row_id", how="left")
+
+    for f in features:
+        ref_col = f"{f}__ref"
+        ref2_col = f"{f}__ref2"
+        if ref_col in merged.columns:
+            merged[f] = merged[ref_col].combine_first(merged.get(f))
+        if ref2_col in merged.columns:
+            merged[f] = merged[ref2_col].combine_first(merged.get(f))
+
+    drop_cols = [c for c in merged.columns if c.endswith("__ref") or c.endswith("__ref2") or c == "_row_id"]
+    return merged.drop(columns=drop_cols)
+
+
 def _predict_candidates(model, features: list[str], input_df: pd.DataFrame) -> pd.DataFrame:
     x = input_df.reindex(columns=features, fill_value=0).fillna(0.0)
     output = input_df.copy()
     output["score"] = model.predict_proba(x)[:, 1]
-    output["pred_rank"] = (
-        output.groupby("gg_position")["score"].rank(method="first", ascending=False).astype(int)
-    )
+    if "year" in output.columns and output["year"].notna().any():
+        rank_keys = ["year", "gg_position"]
+    else:
+        rank_keys = ["gg_position"]
+    output["pred_rank"] = output.groupby(rank_keys)["score"].rank(method="first", ascending=False).astype(int)
     return output
 
 
@@ -157,17 +239,17 @@ def _radar_chart(top_row: pd.Series, target_row: pd.Series, features: list[str],
         return
 
     labels = cols
-    angles = [n / float(len(labels)) * 2 * pi for n in range(len(labels))]
-    angles += angles[:1]
-
     p1 = [float(top_row.get(c, 0) or 0) for c in labels]
     p2 = [float(target_row.get(c, 0) or 0) for c in labels]
     p1 += p1[:1]
     p2 += p2[:1]
 
+    angles = [n / float(len(labels)) * 2 * 3.141592653589793 for n in range(len(labels))]
+    angles += angles[:1]
+
     fig, ax = plt.subplots(figsize=(4, 4), subplot_kw={"polar": True})
-    ax.plot(angles, p1, linewidth=2, linestyle="-", label=f"Top: {top_row['name']}")
-    ax.plot(angles, p2, linewidth=2, linestyle="-", label=f"Selected: {target_row['name']}")
+    ax.plot(angles, p1, linewidth=2, linestyle="-", label=f"1위: {top_row['name']}")
+    ax.plot(angles, p2, linewidth=2, linestyle="-", label=f"선택: {target_row['name']}")
     ax.set_xticks(angles[:-1])
     ax.set_xticklabels(labels, fontsize=8)
     ax.set_yticklabels([])
@@ -224,15 +306,28 @@ def main() -> None:
         return
 
     mode_set = set(ingest_modes)
+    use_reference_enrichment = "raw_approx" in mode_set
     if "raw_approx" in mode_set:
         st.warning(
             "현재 업로드는 raw 근사 모드입니다. `pred_2025.parquet`과 완전 동일한 결과를 원하면 "
             "train_table 기반(모델 피처 포함) 테스트 파일을 사용하세요."
         )
     else:
-        st.success("모델 피처 정합 모드로 예측 중입니다 (predict 스크립트와 높은 일관성 기대).")
+        st.success("모델 피처 정합 모드입니다. Streamlit은 predict 스크립트와 동일 경로로 점수 계산합니다.")
 
     input_df = pd.concat(inputs, ignore_index=True)
+    if use_reference_enrichment:
+        input_df = _enrich_with_reference_features(input_df, features)
+        st.info("raw 근사 모드 보정: train_table 참조 피처 보강을 적용했습니다.")
+    else:
+        st.info("model_ready 모드: 참조 피처 보강을 건너뛰고 업로드 피처를 그대로 사용합니다.")
+
+    available_features = [f for f in features if f in input_df.columns]
+    if len(available_features) < len(features):
+        st.warning(
+            f"모델 피처 정합도: {len(available_features)}/{len(features)}. "
+            "누락 피처는 0으로 처리되어 predict 스크립트 결과와 차이가 날 수 있습니다."
+        )
     pred_df = _predict_candidates(model, features, input_df)
 
     final_views = []
