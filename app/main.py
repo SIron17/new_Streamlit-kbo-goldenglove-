@@ -8,6 +8,7 @@ from pathlib import Path
 
 import matplotlib.font_manager as fm
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 import streamlit as st
 
@@ -188,36 +189,35 @@ def _enrich_with_reference_features(input_df: pd.DataFrame, features: list[str])
 
     # 1순위: 연도+player_id 정합, 2순위: 연도+이름+팀+포지션
     merged = input_df.copy()
-    merged["_row_id"] = range(len(merged))
+    merged["_row_id"] = np.arange(len(merged))
 
-    base_ref = ref.drop_duplicates(subset=[c for c in ["year", "player_id", "name", "team", "gg_position"] if c in ref.columns])
+    def _build_lookup(keys: list[str], suffix: str) -> pd.DataFrame | None:
+        if not all(c in merged.columns and c in ref.columns for c in keys):
+            return None
+        cols = keys + [f for f in features if f in ref.columns]
+        lookup = ref[cols].drop_duplicates(subset=keys, keep="first")
+        out = merged[["_row_id"] + keys].merge(lookup, on=keys, how="left")
+        rename_map = {f: f"{f}{suffix}" for f in features if f in out.columns}
+        return out[["_row_id"] + list(rename_map.keys())].rename(columns=rename_map)
 
-    use_primary = all(c in merged.columns and c in base_ref.columns for c in ["year", "player_id"])
-    if use_primary:
-        primary_ref_cols = [c for c in ["year", "player_id"] + features if c in base_ref.columns]
-        m1 = merged.merge(base_ref[primary_ref_cols], on=["year", "player_id"], how="left", suffixes=("", "__ref"))
-    else:
-        m1 = merged
+    primary_hit = _build_lookup(["year", "player_id"], suffix="__ref")
+    fallback_hit = _build_lookup(["year", "name", "team", "gg_position"], suffix="__ref2")
 
-    fallback_keys = [c for c in ["year", "name", "team", "gg_position"] if c in merged.columns and c in base_ref.columns]
-    if len(fallback_keys) >= 3:
-        fallback_ref_cols = [c for c in fallback_keys + features if c in base_ref.columns]
-        m2 = merged.merge(base_ref[fallback_ref_cols], on=fallback_keys, how="left", suffixes=("", "__ref2"))
-    else:
-        m2 = merged
+    if primary_hit is not None:
+        merged = merged.merge(primary_hit, on="_row_id", how="left")
+    if fallback_hit is not None:
+        merged = merged.merge(fallback_hit, on="_row_id", how="left")
 
-    merged = m1
     for f in features:
         ref_col = f"{f}__ref"
+        ref2_col = f"{f}__ref2"
         if ref_col in merged.columns:
             merged[f] = merged[ref_col].combine_first(merged.get(f))
-            merged.drop(columns=[ref_col], inplace=True)
-        ref2_col = f"{f}__ref2"
-        if ref2_col in m2.columns:
-            merged[f] = m2[ref2_col].combine_first(merged.get(f))
+        if ref2_col in merged.columns:
+            merged[f] = merged[ref2_col].combine_first(merged.get(f))
 
-    merged = merged.drop(columns=[c for c in ["_row_id"] if c in merged.columns])
-    return merged
+    drop_cols = [c for c in merged.columns if c.endswith("__ref") or c.endswith("__ref2") or c == "_row_id"]
+    return merged.drop(columns=drop_cols)
 
 
 def _predict_candidates(model, features: list[str], input_df: pd.DataFrame) -> pd.DataFrame:
