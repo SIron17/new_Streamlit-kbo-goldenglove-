@@ -224,9 +224,11 @@ def _predict_candidates(model, features: list[str], input_df: pd.DataFrame) -> p
     x = input_df.reindex(columns=features, fill_value=0).fillna(0.0)
     output = input_df.copy()
     output["score"] = model.predict_proba(x)[:, 1]
-    output["pred_rank"] = (
-        output.groupby("gg_position")["score"].rank(method="first", ascending=False).astype(int)
-    )
+    if "year" in output.columns and output["year"].notna().any():
+        rank_keys = ["year", "gg_position"]
+    else:
+        rank_keys = ["gg_position"]
+    output["pred_rank"] = output.groupby(rank_keys)["score"].rank(method="first", ascending=False).astype(int)
     return output
 
 
@@ -304,16 +306,21 @@ def main() -> None:
         return
 
     mode_set = set(ingest_modes)
+    use_reference_enrichment = "raw_approx" in mode_set
     if "raw_approx" in mode_set:
         st.warning(
             "현재 업로드는 raw 근사 모드입니다. `pred_2025.parquet`과 완전 동일한 결과를 원하면 "
             "train_table 기반(모델 피처 포함) 테스트 파일을 사용하세요."
         )
     else:
-        st.success("모델 피처 정합 모드로 예측 중입니다 (predict 스크립트와 높은 일관성 기대).")
+        st.success("모델 피처 정합 모드입니다. Streamlit은 predict 스크립트와 동일 경로로 점수 계산합니다.")
 
     input_df = pd.concat(inputs, ignore_index=True)
-    input_df = _enrich_with_reference_features(input_df, features)
+    if use_reference_enrichment:
+        input_df = _enrich_with_reference_features(input_df, features)
+        st.info("raw 근사 모드 보정: train_table 참조 피처 보강을 적용했습니다.")
+    else:
+        st.info("model_ready 모드: 참조 피처 보강을 건너뛰고 업로드 피처를 그대로 사용합니다.")
 
     available_features = [f for f in features if f in input_df.columns]
     if len(available_features) < len(features):
