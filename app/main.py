@@ -4,15 +4,16 @@ from __future__ import annotations
 
 import json
 import pickle
-from math import pi
 from pathlib import Path
 
+import matplotlib.font_manager as fm
 import matplotlib.pyplot as plt
 import pandas as pd
 import streamlit as st
 
 MODEL_PATH = Path("models/baseline_model.pkl")
 FEATURES_PATH = Path("models/baseline_features.json")
+REFERENCE_TABLE_PATH = Path("data/processed/train_table.parquet")
 
 POSITION_TOPK_RULES = {
     "P": 3,
@@ -47,13 +48,20 @@ RADAR_PITCHER = ["stat_ERA", "stat_WHIP", "stat_SO", "stat_W", "stat_HR"]
 
 
 def _configure_korean_font() -> None:
-    plt.rcParams["font.family"] = [
+    candidate_names = [
+        "Noto Sans CJK KR",
+        "Noto Sans KR",
+        "NanumGothic",
         "Malgun Gothic",
         "AppleGothic",
-        "NanumGothic",
-        "Noto Sans CJK KR",
-        "DejaVu Sans",
     ]
+    available = {f.name for f in fm.fontManager.ttflist}
+    for name in candidate_names:
+        if name in available:
+            plt.rcParams["font.family"] = name
+            break
+    else:
+        plt.rcParams["font.family"] = "DejaVu Sans"
     plt.rcParams["axes.unicode_minus"] = False
 
 
@@ -77,6 +85,8 @@ def _to_unified_schema(df: pd.DataFrame, is_pitcher: bool, features: list[str]) 
         "Pos.": "position",
         "Position": "position",
         "position": "position",
+        "Year": "year",
+        "year": "year",
         "Age": "age",
         "age": "age",
     }
@@ -122,7 +132,8 @@ def _to_unified_schema(df: pd.DataFrame, is_pitcher: bool, features: list[str]) 
 
     out["name"] = out["name"].astype(str).str.strip()
     out["team"] = out["team"].astype(str).str.strip()
-    out["pred_year"] = 9999
+    if "year" not in out.columns:
+        out["year"] = 9999
 
     return out, mode
 
@@ -138,6 +149,39 @@ def _load_model_and_features():
     with FEATURES_PATH.open("r", encoding="utf-8") as f:
         meta = json.load(f)
     return model, meta["features"]
+
+
+def _enrich_with_reference_features(input_df: pd.DataFrame, features: list[str]) -> pd.DataFrame:
+    if not REFERENCE_TABLE_PATH.exists():
+        return input_df
+
+    try:
+        ref_all_cols = pd.read_parquet(REFERENCE_TABLE_PATH, columns=[]).columns.tolist()
+        ref_cols = [
+            c
+            for c in ["year", "name", "team", "gg_position", "player_id"] + features
+            if c in ref_all_cols
+        ]
+        ref = pd.read_parquet(REFERENCE_TABLE_PATH, columns=ref_cols)
+    except Exception:
+        return input_df
+
+    if "year" in input_df.columns:
+        target_year = pd.to_numeric(input_df["year"], errors="coerce").dropna()
+        if not target_year.empty:
+            ref = ref[ref["year"] == int(target_year.mode().iloc[0])]
+
+    key_cols = [c for c in ["name", "team", "gg_position"] if c in input_df.columns and c in ref.columns]
+    if len(key_cols) < 2:
+        return input_df
+
+    merged = input_df.merge(ref, on=key_cols, how="left", suffixes=("", "__ref"))
+    for f in features:
+        ref_col = f"{f}__ref"
+        if ref_col in merged.columns:
+            merged[f] = merged[ref_col].combine_first(merged.get(f))
+            merged.drop(columns=[ref_col], inplace=True)
+    return merged
 
 
 def _predict_candidates(model, features: list[str], input_df: pd.DataFrame) -> pd.DataFrame:
@@ -157,17 +201,17 @@ def _radar_chart(top_row: pd.Series, target_row: pd.Series, features: list[str],
         return
 
     labels = cols
-    angles = [n / float(len(labels)) * 2 * pi for n in range(len(labels))]
-    angles += angles[:1]
-
     p1 = [float(top_row.get(c, 0) or 0) for c in labels]
     p2 = [float(target_row.get(c, 0) or 0) for c in labels]
     p1 += p1[:1]
     p2 += p2[:1]
 
+    angles = [n / float(len(labels)) * 2 * 3.141592653589793 for n in range(len(labels))]
+    angles += angles[:1]
+
     fig, ax = plt.subplots(figsize=(4, 4), subplot_kw={"polar": True})
-    ax.plot(angles, p1, linewidth=2, linestyle="-", label=f"Top: {top_row['name']}")
-    ax.plot(angles, p2, linewidth=2, linestyle="-", label=f"Selected: {target_row['name']}")
+    ax.plot(angles, p1, linewidth=2, linestyle="-", label=f"1위: {top_row['name']}")
+    ax.plot(angles, p2, linewidth=2, linestyle="-", label=f"선택: {target_row['name']}")
     ax.set_xticks(angles[:-1])
     ax.set_xticklabels(labels, fontsize=8)
     ax.set_yticklabels([])
@@ -233,6 +277,14 @@ def main() -> None:
         st.success("모델 피처 정합 모드로 예측 중입니다 (predict 스크립트와 높은 일관성 기대).")
 
     input_df = pd.concat(inputs, ignore_index=True)
+    input_df = _enrich_with_reference_features(input_df, features)
+
+    available_features = [f for f in features if f in input_df.columns]
+    if len(available_features) < len(features):
+        st.warning(
+            f"모델 피처 정합도: {len(available_features)}/{len(features)}. "
+            "누락 피처는 0으로 처리되어 predict 스크립트 결과와 차이가 날 수 있습니다."
+        )
     pred_df = _predict_candidates(model, features, input_df)
 
     final_views = []

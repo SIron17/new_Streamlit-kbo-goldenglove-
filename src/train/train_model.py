@@ -129,9 +129,15 @@ def evaluate_one_year(
     y_test = test_df["label"].astype(int)
 
     model = LGBMClassifier(
-        n_estimators=300,
+        n_estimators=200,
         learning_rate=0.05,
-        num_leaves=31,
+        num_leaves=15,
+        min_child_samples=20,
+        feature_fraction=0.8,
+        bagging_fraction=0.8,
+        bagging_freq=1,
+        reg_alpha=0.5,
+        reg_lambda=1.0,
         objective="binary",
         random_state=random_state,
         class_weight="balanced",
@@ -215,9 +221,15 @@ def main() -> None:
     x_test = test_df[features].fillna(0.0)
 
     model = LGBMClassifier(
-        n_estimators=300,
+        n_estimators=200,
         learning_rate=0.05,
-        num_leaves=31,
+        num_leaves=15,
+        min_child_samples=20,
+        feature_fraction=0.8,
+        bagging_fraction=0.8,
+        bagging_freq=1,
+        reg_alpha=0.5,
+        reg_lambda=1.0,
         objective="binary",
         random_state=args.random_state,
         class_weight="balanced",
