@@ -71,6 +71,19 @@ def _safe_numeric(df: pd.DataFrame, cols: list[str]) -> None:
             df[c] = pd.to_numeric(df[c], errors="coerce")
 
 
+def _normalize_player_keys(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    if "name" in out.columns:
+        out["name"] = out["name"].astype(str).str.strip()
+    if "team" in out.columns:
+        out["team"] = out["team"].astype(str).str.strip()
+    if "year" in out.columns:
+        out["year"] = pd.to_numeric(out["year"], errors="coerce")
+    if "player_id" in out.columns:
+        out["player_id"] = pd.to_numeric(out["player_id"], errors="coerce")
+    return out
+
+
 def _looks_like_model_ready(df: pd.DataFrame, features: list[str]) -> bool:
     base_cols = {"name", "team", "gg_position"}
     return base_cols.issubset(df.columns) and len([f for f in features if f in df.columns]) >= max(10, len(features) // 3)
@@ -119,7 +132,7 @@ def _to_unified_schema(df: pd.DataFrame, is_pitcher: bool, features: list[str]) 
         out = out[out["gg_position"].isin(POSITION_TOPK_RULES.keys())].copy()
         out["is_pitcher"] = 0
 
-    keep_non_stats = {"name", "team", "age", "gg_position", "is_pitcher"}
+    keep_non_stats = {"year", "player_id", "name", "team", "age", "gg_position", "is_pitcher"}
     for col in list(out.columns):
         if col in keep_non_stats or col.startswith("stat_"):
             continue
@@ -130,8 +143,7 @@ def _to_unified_schema(df: pd.DataFrame, is_pitcher: bool, features: list[str]) 
     stat_cols = [c for c in out.columns if c.startswith("stat_")] + ["age"]
     _safe_numeric(out, stat_cols)
 
-    out["name"] = out["name"].astype(str).str.strip()
-    out["team"] = out["team"].astype(str).str.strip()
+    out = _normalize_player_keys(out)
     if "year" not in out.columns:
         out["year"] = 9999
 
@@ -166,21 +178,45 @@ def _enrich_with_reference_features(input_df: pd.DataFrame, features: list[str])
     except Exception:
         return input_df
 
+    input_df = _normalize_player_keys(input_df)
+    ref = _normalize_player_keys(ref)
+
     if "year" in input_df.columns:
         target_year = pd.to_numeric(input_df["year"], errors="coerce").dropna()
         if not target_year.empty:
             ref = ref[ref["year"] == int(target_year.mode().iloc[0])]
 
-    key_cols = [c for c in ["name", "team", "gg_position"] if c in input_df.columns and c in ref.columns]
-    if len(key_cols) < 2:
-        return input_df
+    # 1순위: 연도+player_id 정합, 2순위: 연도+이름+팀+포지션
+    merged = input_df.copy()
+    merged["_row_id"] = range(len(merged))
 
-    merged = input_df.merge(ref, on=key_cols, how="left", suffixes=("", "__ref"))
+    base_ref = ref.drop_duplicates(subset=[c for c in ["year", "player_id", "name", "team", "gg_position"] if c in ref.columns])
+
+    use_primary = all(c in merged.columns and c in base_ref.columns for c in ["year", "player_id"])
+    if use_primary:
+        primary_ref_cols = [c for c in ["year", "player_id"] + features if c in base_ref.columns]
+        m1 = merged.merge(base_ref[primary_ref_cols], on=["year", "player_id"], how="left", suffixes=("", "__ref"))
+    else:
+        m1 = merged
+
+    fallback_keys = [c for c in ["year", "name", "team", "gg_position"] if c in merged.columns and c in base_ref.columns]
+    if len(fallback_keys) >= 3:
+        fallback_ref_cols = [c for c in fallback_keys + features if c in base_ref.columns]
+        m2 = merged.merge(base_ref[fallback_ref_cols], on=fallback_keys, how="left", suffixes=("", "__ref2"))
+    else:
+        m2 = merged
+
+    merged = m1
     for f in features:
         ref_col = f"{f}__ref"
         if ref_col in merged.columns:
             merged[f] = merged[ref_col].combine_first(merged.get(f))
             merged.drop(columns=[ref_col], inplace=True)
+        ref2_col = f"{f}__ref2"
+        if ref2_col in m2.columns:
+            merged[f] = m2[ref2_col].combine_first(merged.get(f))
+
+    merged = merged.drop(columns=[c for c in ["_row_id"] if c in merged.columns])
     return merged
 
 
