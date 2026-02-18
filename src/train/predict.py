@@ -59,6 +59,8 @@ def main() -> None:
     )
 
     output_cols = ["year", "gg_position", "name", "team", "score", "pred_rank"]
+    if "player_id" in pred_df.columns:
+        output_cols.insert(2, "player_id")
     output_cols += [c for c in DISPLAY_STATS if c in pred_df.columns]
 
     out = pred_df[output_cols].sort_values(["gg_position", "pred_rank"]).reset_index(drop=True)

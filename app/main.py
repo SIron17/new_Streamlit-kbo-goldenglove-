@@ -46,13 +46,29 @@ RADAR_HITTER = ["stat_AVG", "stat_OBP", "stat_SLG", "stat_OPS", "stat_HR"]
 RADAR_PITCHER = ["stat_ERA", "stat_WHIP", "stat_SO", "stat_W", "stat_HR"]
 
 
+def _configure_korean_font() -> None:
+    plt.rcParams["font.family"] = [
+        "Malgun Gothic",
+        "AppleGothic",
+        "NanumGothic",
+        "Noto Sans CJK KR",
+        "DejaVu Sans",
+    ]
+    plt.rcParams["axes.unicode_minus"] = False
+
+
 def _safe_numeric(df: pd.DataFrame, cols: list[str]) -> None:
     for c in cols:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
 
 
-def _to_unified_schema(df: pd.DataFrame, is_pitcher: bool) -> pd.DataFrame:
+def _looks_like_model_ready(df: pd.DataFrame, features: list[str]) -> bool:
+    base_cols = {"name", "team", "gg_position"}
+    return base_cols.issubset(df.columns) and len([f for f in features if f in df.columns]) >= max(10, len(features) // 3)
+
+
+def _to_unified_schema(df: pd.DataFrame, is_pitcher: bool, features: list[str]) -> tuple[pd.DataFrame, str]:
     rename_candidates = {
         "Name": "name",
         "name": "name",
@@ -66,6 +82,16 @@ def _to_unified_schema(df: pd.DataFrame, is_pitcher: bool) -> pd.DataFrame:
     }
     out = df.rename(columns={k: v for k, v in rename_candidates.items() if k in df.columns}).copy()
 
+    if _looks_like_model_ready(out, features):
+        mode = "model_ready"
+        out["name"] = out["name"].astype(str).str.strip()
+        out["team"] = out["team"].astype(str).str.strip()
+        if "age" not in out.columns:
+            out["age"] = 0
+        _safe_numeric(out, [c for c in out.columns if c.startswith("stat_")] + ["age"])
+        return out, mode
+
+    mode = "raw_approx"
     if "name" not in out.columns:
         raise ValueError("업로드 파일에 선수 이름 컬럼(Name 또는 name)이 필요합니다.")
     if "team" not in out.columns:
@@ -98,7 +124,7 @@ def _to_unified_schema(df: pd.DataFrame, is_pitcher: bool) -> pd.DataFrame:
     out["team"] = out["team"].astype(str).str.strip()
     out["pred_year"] = 9999
 
-    return out
+    return out, mode
 
 
 def _load_model_and_features():
@@ -151,6 +177,7 @@ def _radar_chart(top_row: pd.Series, target_row: pd.Series, features: list[str],
 
 
 def main() -> None:
+    _configure_korean_font()
     st.set_page_config(page_title="KBO 골든글러브 예측모델", page_icon="⚾", layout="wide")
     st.title("KBO 골든글러브 수상자 예측모델")
 
@@ -160,12 +187,12 @@ def main() -> None:
     position_for_detail = st.sidebar.selectbox("세부 분석 포지션", list(POSITION_TOPK_RULES.keys()))
 
     st.caption(
-        "현재 앱은 연도 선택 대신 업로드한 선수 데이터로 즉시 예측합니다. "
-        "포지션별 Top-k 표시: Outfielders Top-9, 나머지 Top-3"
+        "업로드 데이터 기반 예측입니다. "
+        "Outfielders Top-9 / 그 외 Top-3"
     )
 
     if not hitter_file and not pitcher_file:
-        st.info("타자/투수 CSV를 업로드하면 모델이 즉시 후보를 예측합니다.")
+        st.info("타자/투수 CSV를 업로드하면 모델이 후보를 예측합니다.")
         return
 
     try:
@@ -175,14 +202,19 @@ def main() -> None:
         return
 
     inputs: list[pd.DataFrame] = []
+    ingest_modes: list[str] = []
 
     try:
         if hitter_file is not None:
             hitters = pd.read_csv(hitter_file)
-            inputs.append(_to_unified_schema(hitters, is_pitcher=False))
+            h_df, h_mode = _to_unified_schema(hitters, is_pitcher=False, features=features)
+            inputs.append(h_df)
+            ingest_modes.append(h_mode)
         if pitcher_file is not None:
             pitchers = pd.read_csv(pitcher_file)
-            inputs.append(_to_unified_schema(pitchers, is_pitcher=True))
+            p_df, p_mode = _to_unified_schema(pitchers, is_pitcher=True, features=features)
+            inputs.append(p_df)
+            ingest_modes.append(p_mode)
     except Exception as exc:
         st.error(f"입력 파일 처리 오류: {exc}")
         return
@@ -190,6 +222,15 @@ def main() -> None:
     if not inputs:
         st.warning("예측 가능한 입력 데이터가 없습니다.")
         return
+
+    mode_set = set(ingest_modes)
+    if "raw_approx" in mode_set:
+        st.warning(
+            "현재 업로드는 raw 근사 모드입니다. `pred_2025.parquet`과 완전 동일한 결과를 원하면 "
+            "train_table 기반(모델 피처 포함) 테스트 파일을 사용하세요."
+        )
+    else:
+        st.success("모델 피처 정합 모드로 예측 중입니다 (predict 스크립트와 높은 일관성 기대).")
 
     input_df = pd.concat(inputs, ignore_index=True)
     pred_df = _predict_candidates(model, features, input_df)
