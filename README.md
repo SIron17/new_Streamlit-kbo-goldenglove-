@@ -94,6 +94,17 @@ streamlit run app/main.py
   - 나머지 포지션 Top-3
 - 모델 학습은 앱에서 수행하지 않고, 사전에 학습된 모델(`models/`)을 사용합니다.
 
+#### Streamlit 테스트용 업로드 파일 생성 (예: 2025)
+```bash
+python -m scripts.create_streamlit_test_files --year 2025
+```
+
+생성 파일:
+- `data/sample/streamlit_hitter_2025.csv`
+- `data/sample/streamlit_pitcher_2025.csv`
+
+이 2개 파일을 Streamlit 사이드바 업로더에 넣어서 UI를 바로 테스트할 수 있습니다.
+
 ### 5) 베이스라인 학습 + 평가
 ```bash
 python -m src.train.train_model
